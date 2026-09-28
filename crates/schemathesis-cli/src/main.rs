@@ -64,6 +64,26 @@ enum Commands {
         #[arg(long = "report-json-path")]
         report_json_path: Option<PathBuf>,
 
+        /// Exclude operations matching pointer expression (e.g. '/x-heavenhub-lifecycle == planned')
+        #[arg(long = "exclude-by")]
+        exclude_by: Option<String>,
+
+        /// Health check suppression (compatibility flag)
+        #[arg(long = "suppress-health-check")]
+        suppress_health_check: Option<String>,
+
+        /// Phase control (compatibility flag)
+        #[arg(long = "phases")]
+        phases: Option<String>,
+
+        /// Directory for reports (compatibility flag)
+        #[arg(long = "report-dir")]
+        report_dir: Option<PathBuf>,
+
+        /// Path to configuration file (compatibility flag)
+        #[arg(long = "config-file")]
+        config_file: Option<PathBuf>,
+
         /// Disable ANSI color formatting
         #[arg(long = "no-color", default_value_t = false)]
         no_color: bool,
@@ -134,6 +154,11 @@ async fn main() -> Result<()> {
             report,
             output,
             report_json_path,
+            exclude_by,
+            suppress_health_check: _,
+            phases: _,
+            report_dir: _,
+            config_file: _,
             no_color: _,
         } => {
             println!("🚀 Starting schemathesis-rs...");
@@ -188,7 +213,7 @@ async fn main() -> Result<()> {
             };
 
             let total_ops = spec.operations.len();
-            let selected_ops: Vec<&schemathesis_core::model::Operation> = if include_name.is_empty() {
+            let mut selected_ops: Vec<&schemathesis_core::model::Operation> = if include_name.is_empty() {
                 spec.operations.iter().collect()
             } else {
                 spec.operations
@@ -203,6 +228,23 @@ async fn main() -> Result<()> {
                     })
                     .collect()
             };
+
+            if let Some(rule) = &exclude_by {
+                if let Some((pointer, expected_val)) = rule.split_once("==") {
+                    let pointer = pointer.trim();
+                    let expected_val = expected_val.trim().trim_matches('\'').trim_matches('"');
+                    selected_ops.retain(|op| {
+                        if let Some(raw) = &op.raw {
+                            if let Some(actual) = raw.pointer(pointer) {
+                                if let Some(actual_str) = actual.as_str() {
+                                    return actual_str != expected_val;
+                                }
+                            }
+                        }
+                        true
+                    });
+                }
+            }
 
             println!(
                 "✅ Schema loaded successfully: {} (v{}) with {} selected / {} total operations.\n",

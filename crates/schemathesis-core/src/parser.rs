@@ -156,6 +156,7 @@ fn parse_openapi_value(root: &Value) -> Result<ApiSpecification, CoreError> {
                     parameters,
                     request_body,
                     responses,
+                    raw: Some(op_val.clone()),
                 });
             }
         }

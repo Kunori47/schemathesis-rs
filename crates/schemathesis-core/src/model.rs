@@ -50,6 +50,8 @@ pub struct Operation {
     pub parameters: Vec<Parameter>,
     pub request_body: Option<serde_json::Value>,
     pub responses: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub raw: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
