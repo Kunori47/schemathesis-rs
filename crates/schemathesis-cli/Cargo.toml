@@ -15,6 +15,7 @@ schemathesis-runner.workspace = true
 clap.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
+serde_json.workspace = true
 anyhow = "1.0"
 
 [dev-dependencies]
