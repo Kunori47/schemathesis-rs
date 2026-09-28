@@ -90,3 +90,40 @@ fn test_shrinker_reduces_failing_case_payload() {
     });
     assert!(found_shrunk_query, "Candidates should include shrunk query params");
 }
+
+#[tokio::test]
+async fn test_concurrent_batch_execution_handles_all_cases() {
+    use schemathesis_runner::HttpRunner;
+    use std::sync::Arc;
+
+    let runner = HttpRunner::new("http://127.0.0.1:9".into());
+    let cases = vec![
+        GeneratedCase {
+            method: HttpMethod::Get,
+            path: "/item/1".into(),
+            headers: HashMap::new(),
+            query_params: vec![],
+            body: None,
+        },
+        GeneratedCase {
+            method: HttpMethod::Get,
+            path: "/item/2".into(),
+            headers: HashMap::new(),
+            query_params: vec![],
+            body: None,
+        },
+        GeneratedCase {
+            method: HttpMethod::Get,
+            path: "/item/3".into(),
+            headers: HashMap::new(),
+            query_params: vec![],
+            body: None,
+        },
+    ];
+
+    let checks: Arc<Vec<Box<dyn Check>>> = Arc::new(vec![Box::new(NotAServerErrorCheck)]);
+    let results = runner.execute_batch_concurrent(cases, checks, 2).await;
+
+    // Concurrency pool correctly processed all 3 cases
+    assert_eq!(results.len(), 3);
+}
