@@ -6,6 +6,12 @@ pub struct ValueGenerator {
     seed: Option<u64>,
 }
 
+impl Default for ValueGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ValueGenerator {
     pub fn new() -> Self {
         Self { seed: None }
@@ -139,7 +145,7 @@ mod tests {
         for _ in 0..20 {
             let val = generator.generate_from_schema(&schema);
             let num = val.as_i64().expect("should be integer");
-            assert!(num >= 10 && num <= 20, "Generated {} out of bounds", num);
+            assert!((10..=20).contains(&num), "Generated {} out of bounds", num);
         }
     }
 
