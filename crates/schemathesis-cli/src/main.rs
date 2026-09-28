@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use schemathesis_core::check::Check;
 use schemathesis_core::parser::{parse_openapi_json, parse_openapi_yaml};
-use schemathesis_generator::CaseGenerator;
+use schemathesis_generator::{CaseGenerator, Shrinker};
 use schemathesis_runner::checks::{NotAServerErrorCheck, StatusCodeConformanceCheck};
 use schemathesis_runner::executor::HttpRunner;
 use std::fs;
@@ -41,11 +41,12 @@ async fn main() -> Result<()> {
         Commands::Run {
             schema,
             base_url,
-            max_examples: _,
+            max_examples,
         } => {
             println!("🚀 Starting schemathesis-rs...");
             println!("📄 Reading schema from: {}", schema);
             println!("🎯 Base URL: {}", base_url);
+            println!("🧪 Max examples per endpoint: {}", max_examples);
 
             let schema_content = if schema.starts_with("http://") || schema.starts_with("https://") {
                 reqwest::get(&schema)
@@ -66,50 +67,95 @@ async fn main() -> Result<()> {
             };
 
             println!(
-                "✅ Schema loaded successfully: {} (v{}) with {} operations.",
+                "✅ Schema loaded successfully: {} (v{}) with {} operations.\n",
                 spec.title,
                 spec.version,
                 spec.operations.len()
             );
 
             let generator = CaseGenerator::new();
+            let shrinker = Shrinker::new();
             let runner = HttpRunner::new(base_url);
 
             let mut total_passed = 0;
             let mut total_failed = 0;
 
             for op in &spec.operations {
-                let case = generator.generate_case(op);
+                let cases = generator.generate_cases(op, max_examples);
                 let allowed_codes: Vec<String> = op.responses.keys().cloned().collect();
 
-                let checks: Vec<Box<dyn Check>> = vec![
-                    Box::new(NotAServerErrorCheck),
-                    Box::new(StatusCodeConformanceCheck::new(allowed_codes)),
-                ];
+                let mut op_passed = true;
+                let mut op_failure_details = Vec::new();
+                let mut first_failing_case = None;
 
-                print!("  Testing [{} {}] ... ", case.method.as_str(), case.path);
+                for case in cases {
+                    let checks: Vec<Box<dyn Check>> = vec![
+                        Box::new(NotAServerErrorCheck),
+                        Box::new(StatusCodeConformanceCheck::new(allowed_codes.clone())),
+                    ];
 
-                match runner.execute_case(&case, &checks).await {
-                    Ok(result) => {
-                        if result.passed {
-                            println!("PASSED");
-                            total_passed += 1;
-                        } else {
-                            println!("FAILED");
-                            for check_res in result.check_results {
-                                if let schemathesis_core::check::CheckStatus::Failure(msg) =
-                                    check_res.status
-                                {
-                                    println!("    ❌ [{}]: {}", check_res.check_name, msg);
-                                }
+                    match runner.execute_case(&case, &checks).await {
+                        Ok(result) => {
+                            if !result.passed {
+                                op_passed = false;
+                                op_failure_details = result.check_results;
+                                first_failing_case = Some(case);
+                                break;
                             }
-                            total_failed += 1;
+                        }
+                        Err(e) => {
+                            op_passed = false;
+                            op_failure_details = vec![schemathesis_core::check::CheckResult::failure(
+                                "network_error",
+                                e.to_string(),
+                            )];
+                            first_failing_case = Some(case);
+                            break;
                         }
                     }
-                    Err(e) => {
-                        println!("ERROR (Network/Connection failed: {})", e);
-                        total_failed += 1;
+                }
+
+                if op_passed {
+                    println!("  [{} {}] ... PASSED ({} checks)", op.method.as_str(), op.path, max_examples);
+                    total_passed += 1;
+                } else {
+                    println!("  [{} {}] ... FAILED", op.method.as_str(), op.path);
+                    for check_res in &op_failure_details {
+                        if let schemathesis_core::check::CheckStatus::Failure(msg) = &check_res.status {
+                            println!("    ❌ [{}]: {}", check_res.check_name, msg);
+                        }
                     }
+
+                    // Attempt shrinking
+                    if let Some(failing_case) = first_failing_case {
+                        let checks: Vec<Box<dyn Check>> = vec![
+                            Box::new(NotAServerErrorCheck),
+                            Box::new(StatusCodeConformanceCheck::new(allowed_codes.clone())),
+                        ];
+
+                        let candidates = shrinker.candidates(&failing_case);
+                        let mut minimal_reproducer = failing_case.clone();
+
+                        for candidate in candidates {
+                            if let Ok(res) = runner.execute_case(&candidate, &checks).await {
+                                if !res.passed {
+                                    minimal_reproducer = candidate;
+                                    break;
+                                }
+                            }
+                        }
+
+                        println!("    🔍 Minimal reproducible case:");
+                        println!("       Path: {}", minimal_reproducer.path);
+                        if !minimal_reproducer.query_params.is_empty() {
+                            println!("       Query: {:?}", minimal_reproducer.query_params);
+                        }
+                        if let Some(body) = minimal_reproducer.body {
+                            println!("       Body: {}", serde_json::to_string(&body).unwrap_or_default());
+                        }
+                    }
+
+                    total_failed += 1;
                 }
             }
 
