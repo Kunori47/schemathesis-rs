@@ -4,9 +4,11 @@ use schemathesis_core::check::Check;
 use schemathesis_core::parser::{parse_openapi_json, parse_openapi_yaml};
 use schemathesis_generator::{CaseGenerator, Shrinker};
 use schemathesis_runner::checks::{
-    NotAServerErrorCheck, ResponseSchemaConformanceCheck, StatusCodeConformanceCheck,
+    ContentTypeConformanceCheck, NotAServerErrorCheck, ResponseSchemaConformanceCheck,
+    StatusCodeConformanceCheck,
 };
 use schemathesis_runner::executor::HttpRunner;
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,6 +39,10 @@ enum Commands {
         /// Number of concurrent requests
         #[arg(long, default_value_t = 10)]
         concurrency: usize,
+
+        /// Comma-separated list of checks to run (default: all)
+        #[arg(long, default_value = "all")]
+        checks: String,
 
         /// Format of the report (e.g. junit)
         #[arg(long)]
@@ -106,6 +112,7 @@ async fn main() -> Result<()> {
             base_url,
             max_examples,
             concurrency,
+            checks,
             report,
             output,
         } => {
@@ -114,6 +121,25 @@ async fn main() -> Result<()> {
             println!("🎯 Base URL: {}", base_url);
             println!("🧪 Max examples per endpoint: {}", max_examples);
             println!("⚡ Concurrency level: {}", concurrency);
+
+            let enabled_checks: HashSet<String> = if checks == "all" {
+                [
+                    "not_a_server_error",
+                    "status_code_conformance",
+                    "content_type_conformance",
+                    "response_schema_conformance",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect()
+            } else {
+                checks
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect()
+            };
+
+            println!("🛡️ Active checks: {:?}", enabled_checks);
 
             let schema_content = if schema.starts_with("http://") || schema.starts_with("https://") {
                 reqwest::get(&schema)
@@ -152,11 +178,21 @@ async fn main() -> Result<()> {
                 let cases = generator.generate_cases(op, max_examples);
                 let allowed_codes: Vec<String> = op.responses.keys().cloned().collect();
 
-                let checks: Arc<Vec<Box<dyn Check>>> = Arc::new(vec![
-                    Box::new(NotAServerErrorCheck),
-                    Box::new(StatusCodeConformanceCheck::new(allowed_codes.clone())),
-                    Box::new(ResponseSchemaConformanceCheck::new(op.responses.clone())),
-                ]);
+                let mut active_check_list: Vec<Box<dyn Check>> = Vec::new();
+                if enabled_checks.contains("not_a_server_error") {
+                    active_check_list.push(Box::new(NotAServerErrorCheck));
+                }
+                if enabled_checks.contains("status_code_conformance") {
+                    active_check_list.push(Box::new(StatusCodeConformanceCheck::new(allowed_codes.clone())));
+                }
+                if enabled_checks.contains("content_type_conformance") {
+                    active_check_list.push(Box::new(ContentTypeConformanceCheck::new(op.responses.clone())));
+                }
+                if enabled_checks.contains("response_schema_conformance") {
+                    active_check_list.push(Box::new(ResponseSchemaConformanceCheck::new(op.responses.clone())));
+                }
+
+                let checks: Arc<Vec<Box<dyn Check>>> = Arc::new(active_check_list);
 
                 let batch_results = runner
                     .execute_batch_concurrent(cases, Arc::clone(&checks), concurrency)
