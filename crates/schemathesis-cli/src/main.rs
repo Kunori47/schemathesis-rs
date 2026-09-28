@@ -7,6 +7,7 @@ use schemathesis_runner::checks::{NotAServerErrorCheck, StatusCodeConformanceChe
 use schemathesis_runner::executor::HttpRunner;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(name = "schemathesis-rs")]
@@ -30,6 +31,10 @@ enum Commands {
         /// Maximum generated test cases per endpoint
         #[arg(long, default_value_t = 10)]
         max_examples: usize,
+
+        /// Number of concurrent requests
+        #[arg(long, default_value_t = 10)]
+        concurrency: usize,
     },
 }
 
@@ -42,11 +47,13 @@ async fn main() -> Result<()> {
             schema,
             base_url,
             max_examples,
+            concurrency,
         } => {
             println!("🚀 Starting schemathesis-rs...");
             println!("📄 Reading schema from: {}", schema);
             println!("🎯 Base URL: {}", base_url);
             println!("🧪 Max examples per endpoint: {}", max_examples);
+            println!("⚡ Concurrency level: {}", concurrency);
 
             let schema_content = if schema.starts_with("http://") || schema.starts_with("https://") {
                 reqwest::get(&schema)
@@ -84,22 +91,26 @@ async fn main() -> Result<()> {
                 let cases = generator.generate_cases(op, max_examples);
                 let allowed_codes: Vec<String> = op.responses.keys().cloned().collect();
 
+                let checks: Arc<Vec<Box<dyn Check>>> = Arc::new(vec![
+                    Box::new(NotAServerErrorCheck),
+                    Box::new(StatusCodeConformanceCheck::new(allowed_codes.clone())),
+                ]);
+
+                let batch_results = runner
+                    .execute_batch_concurrent(cases, Arc::clone(&checks), concurrency)
+                    .await;
+
                 let mut op_passed = true;
                 let mut op_failure_details = Vec::new();
                 let mut first_failing_case = None;
 
-                for case in cases {
-                    let checks: Vec<Box<dyn Check>> = vec![
-                        Box::new(NotAServerErrorCheck),
-                        Box::new(StatusCodeConformanceCheck::new(allowed_codes.clone())),
-                    ];
-
-                    match runner.execute_case(&case, &checks).await {
-                        Ok(result) => {
-                            if !result.passed {
+                for res in batch_results {
+                    match res {
+                        Ok(exec_res) => {
+                            if !exec_res.passed {
                                 op_passed = false;
-                                op_failure_details = result.check_results;
-                                first_failing_case = Some(case);
+                                op_failure_details = exec_res.check_results;
+                                first_failing_case = Some(exec_res.case);
                                 break;
                             }
                         }
@@ -109,14 +120,18 @@ async fn main() -> Result<()> {
                                 "network_error",
                                 e.to_string(),
                             )];
-                            first_failing_case = Some(case);
                             break;
                         }
                     }
                 }
 
                 if op_passed {
-                    println!("  [{} {}] ... PASSED ({} checks)", op.method.as_str(), op.path, max_examples);
+                    println!(
+                        "  [{} {}] ... PASSED ({} concurrent checks)",
+                        op.method.as_str(),
+                        op.path,
+                        max_examples
+                    );
                     total_passed += 1;
                 } else {
                     println!("  [{} {}] ... FAILED", op.method.as_str(), op.path);
@@ -128,11 +143,6 @@ async fn main() -> Result<()> {
 
                     // Attempt shrinking
                     if let Some(failing_case) = first_failing_case {
-                        let checks: Vec<Box<dyn Check>> = vec![
-                            Box::new(NotAServerErrorCheck),
-                            Box::new(StatusCodeConformanceCheck::new(allowed_codes.clone())),
-                        ];
-
                         let candidates = shrinker.candidates(&failing_case);
                         let mut minimal_reproducer = failing_case.clone();
 
