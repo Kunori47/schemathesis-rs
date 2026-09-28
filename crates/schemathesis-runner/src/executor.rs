@@ -1,8 +1,9 @@
 use schemathesis_core::check::{Check, CheckResult};
 use schemathesis_core::model::{GeneratedCase, ResponsePayload};
 use std::collections::HashMap;
+use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExecutionResult {
     pub case: GeneratedCase,
     pub response: Option<ResponsePayload>,
@@ -10,6 +11,7 @@ pub struct ExecutionResult {
     pub passed: bool,
 }
 
+#[derive(Clone)]
 pub struct HttpRunner {
     base_url: String,
     client: reqwest::Client,
@@ -89,5 +91,34 @@ impl HttpRunner {
             check_results,
             passed,
         })
+    }
+
+    pub async fn execute_batch_concurrent(
+        &self,
+        cases: Vec<GeneratedCase>,
+        checks: Arc<Vec<Box<dyn Check>>>,
+        concurrency: usize,
+    ) -> Vec<Result<ExecutionResult, reqwest::Error>> {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
+        let mut join_set = tokio::task::JoinSet::new();
+
+        for case in cases {
+            let runner = self.clone();
+            let sem = Arc::clone(&semaphore);
+            let checks_ref = Arc::clone(&checks);
+
+            join_set.spawn(async move {
+                let _permit = sem.acquire().await.expect("semaphore closed");
+                runner.execute_case(&case, &checks_ref).await
+            });
+        }
+
+        let mut results = Vec::new();
+        while let Some(res) = join_set.join_next().await {
+            if let Ok(exec_res) = res {
+                results.push(exec_res);
+            }
+        }
+        results
     }
 }
