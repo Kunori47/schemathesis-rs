@@ -59,6 +59,66 @@ impl Check for StatusCodeConformanceCheck {
     }
 }
 
+pub struct ContentTypeConformanceCheck {
+    pub responses: HashMap<String, serde_json::Value>,
+}
+
+impl ContentTypeConformanceCheck {
+    pub fn new(responses: HashMap<String, serde_json::Value>) -> Self {
+        Self { responses }
+    }
+}
+
+impl Check for ContentTypeConformanceCheck {
+    fn name(&self) -> &'static str {
+        "content_type_conformance"
+    }
+
+    fn evaluate(&self, _case: &GeneratedCase, response: &ResponsePayload) -> CheckResult {
+        let code_str = response.status_code.to_string();
+        let wildcard = format!("{}xx", code_str.chars().next().unwrap_or(' '));
+
+        let resp_def = self.responses.get(&code_str)
+            .or_else(|| self.responses.get(&wildcard))
+            .or_else(|| self.responses.get("default"));
+
+        let content_map = match resp_def.and_then(|d| d.get("content")).and_then(|c| c.as_object()) {
+            Some(m) => m,
+            None => return CheckResult::success(self.name()),
+        };
+
+        if content_map.is_empty() {
+            return CheckResult::success(self.name());
+        }
+
+        let content_type = response.headers.get("content-type")
+            .or_else(|| response.headers.get("Content-Type"));
+
+        let content_type = match content_type {
+            Some(ct) => ct.split(';').next().unwrap_or("").trim(),
+            None => {
+                return CheckResult::failure(
+                    self.name(),
+                    format!("Missing Content-Type header in response with status {}", response.status_code),
+                )
+            }
+        };
+
+        if content_map.contains_key(content_type) || content_map.contains_key("*/*") {
+            CheckResult::success(self.name())
+        } else {
+            let expected: Vec<&String> = content_map.keys().collect();
+            CheckResult::failure(
+                self.name(),
+                format!(
+                    "Returned Content-Type '{}' does not match schema expected media types: {:?}",
+                    content_type, expected
+                ),
+            )
+        }
+    }
+}
+
 pub struct ResponseSchemaConformanceCheck {
     pub responses: HashMap<String, serde_json::Value>,
 }
@@ -302,5 +362,53 @@ mod tests {
         };
         let result = check.evaluate(&dummy_case(), &resp);
         assert!(!result.is_success());
+    }
+
+    #[test]
+    fn test_content_type_conformance_passes_when_matching() {
+        let mut responses = HashMap::new();
+        responses.insert(
+            "200".into(),
+            json!({
+                "content": {
+                    "application/json": {}
+                }
+            }),
+        );
+
+        let check = ContentTypeConformanceCheck::new(responses);
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type".into(), "application/json; charset=utf-8".into());
+
+        let resp = ResponsePayload {
+            status_code: 200,
+            headers,
+            body: None,
+        };
+        assert!(check.evaluate(&dummy_case(), &resp).is_success());
+    }
+
+    #[test]
+    fn test_content_type_conformance_fails_when_mismatched() {
+        let mut responses = HashMap::new();
+        responses.insert(
+            "200".into(),
+            json!({
+                "content": {
+                    "application/json": {}
+                }
+            }),
+        );
+
+        let check = ContentTypeConformanceCheck::new(responses);
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type".into(), "text/plain".into());
+
+        let resp = ResponsePayload {
+            status_code: 200,
+            headers,
+            body: None,
+        };
+        assert!(!check.evaluate(&dummy_case(), &resp).is_success());
     }
 }
