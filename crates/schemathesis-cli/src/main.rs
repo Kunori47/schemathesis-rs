@@ -8,7 +8,7 @@ use schemathesis_runner::checks::{
     StatusCodeConformanceCheck,
 };
 use schemathesis_runner::executor::HttpRunner;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,8 +28,8 @@ enum Commands {
         /// Path or URL to OpenAPI schema (JSON or YAML)
         schema: String,
 
-        /// Target base URL of the service under test
-        #[arg(long)]
+        /// Target base URL of the service under test (alias: --url)
+        #[arg(long, visible_alias = "url")]
         base_url: String,
 
         /// Maximum generated test cases per endpoint
@@ -44,13 +44,29 @@ enum Commands {
         #[arg(long, default_value = "all")]
         checks: String,
 
-        /// Format of the report (e.g. junit)
+        /// Operation names or IDs to include (can be specified multiple times)
+        #[arg(long = "include-name")]
+        include_name: Vec<String>,
+
+        /// Custom HTTP headers to include in all requests (e.g. "Authorization: Bearer <token>")
+        #[arg(long = "header")]
+        header: Vec<String>,
+
+        /// Format of the report (e.g. junit, json)
         #[arg(long)]
         report: Option<String>,
 
         /// Path to save the report output
         #[arg(long)]
         output: Option<PathBuf>,
+
+        /// Dedicated JSON report output path (used by Schemathesis CI)
+        #[arg(long = "report-json-path")]
+        report_json_path: Option<PathBuf>,
+
+        /// Disable ANSI color formatting
+        #[arg(long = "no-color", default_value_t = false)]
+        no_color: bool,
     },
 }
 
@@ -113,8 +129,12 @@ async fn main() -> Result<()> {
             max_examples,
             concurrency,
             checks,
+            include_name,
+            header,
             report,
             output,
+            report_json_path,
+            no_color: _,
         } => {
             println!("🚀 Starting schemathesis-rs...");
             println!("📄 Reading schema from: {}", schema);
@@ -139,7 +159,15 @@ async fn main() -> Result<()> {
                     .collect()
             };
 
-            println!("🛡️ Active checks: {:?}", enabled_checks);
+            let mut custom_headers = HashMap::new();
+            for h in &header {
+                if let Some((k, v)) = h.split_once(':') {
+                    custom_headers.insert(k.trim().to_string(), v.trim().to_string());
+                }
+            }
+            if !custom_headers.is_empty() {
+                println!("🔑 Custom headers: {:?}", custom_headers.keys().collect::<Vec<_>>());
+            }
 
             let schema_content = if schema.starts_with("http://") || schema.starts_with("https://") {
                 reqwest::get(&schema)
@@ -159,11 +187,29 @@ async fn main() -> Result<()> {
                 parse_openapi_json(&schema_content).context("Failed to parse JSON OpenAPI schema")?
             };
 
+            let total_ops = spec.operations.len();
+            let selected_ops: Vec<&schemathesis_core::model::Operation> = if include_name.is_empty() {
+                spec.operations.iter().collect()
+            } else {
+                spec.operations
+                    .iter()
+                    .filter(|op| {
+                        let full_name = format!("{} {}", op.method.as_str(), op.path);
+                        include_name.iter().any(|inc| {
+                            op.id.as_deref() == Some(inc.as_str())
+                                || full_name == *inc
+                                || op.path == *inc
+                        })
+                    })
+                    .collect()
+            };
+
             println!(
-                "✅ Schema loaded successfully: {} (v{}) with {} operations.\n",
+                "✅ Schema loaded successfully: {} (v{}) with {} selected / {} total operations.\n",
                 spec.title,
                 spec.version,
-                spec.operations.len()
+                selected_ops.len(),
+                total_ops
             );
 
             let generator = CaseGenerator::new();
@@ -174,8 +220,12 @@ async fn main() -> Result<()> {
             let mut total_failed = 0;
             let mut report_items = Vec::new();
 
-            for op in &spec.operations {
-                let cases = generator.generate_cases(op, max_examples);
+            for op in &selected_ops {
+                let mut cases = generator.generate_cases(op, max_examples);
+                for c in &mut cases {
+                    c.headers.extend(custom_headers.clone());
+                }
+
                 let allowed_codes: Vec<String> = op.responses.keys().cloned().collect();
 
                 let mut active_check_list: Vec<Box<dyn Check>> = Vec::new();
@@ -283,19 +333,45 @@ async fn main() -> Result<()> {
             println!("\n📊 Summary: {} passed, {} failed", total_passed, total_failed);
 
             // Handle reporting
-            if let Some(rep_format) = report {
+            if let Some(rep_format) = &report {
                 if rep_format.to_lowercase() == "junit" {
                     let xml_content = generate_junit_xml(&report_items);
-                    if let Some(out_path) = output {
+                    if let Some(out_path) = &output {
                         if let Some(parent) = out_path.parent() {
                             fs::create_dir_all(parent)?;
                         }
-                        fs::write(&out_path, &xml_content)
+                        fs::write(out_path, &xml_content)
                             .with_context(|| format!("Failed to write JUnit report to {:?}", out_path))?;
                         println!("📝 JUnit report generated at: {:?}", out_path);
                     } else {
                         println!("📝 JUnit report:\n{}", xml_content);
                     }
+                }
+            }
+
+            // Handle JSON report (used by CI and Schemathesis report parsers)
+            let is_json_report = report.as_deref().map(|r| r.to_lowercase()) == Some("json".to_string())
+                || report_json_path.is_some();
+
+            if is_json_report {
+                let json_data = serde_json::json!({
+                    "operations": {
+                        "total": total_ops,
+                        "selected": selected_ops.len(),
+                        "tested": total_passed + total_failed
+                    },
+                    "passed": total_passed,
+                    "failed": total_failed
+                });
+
+                let target_json_path = report_json_path.as_ref().or(output.as_ref());
+                if let Some(p) = target_json_path {
+                    if let Some(parent) = p.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(p, serde_json::to_string_pretty(&json_data)?)
+                        .with_context(|| format!("Failed to write JSON report to {:?}", p))?;
+                    println!("📝 JSON report generated at: {:?}", p);
                 }
             }
 
