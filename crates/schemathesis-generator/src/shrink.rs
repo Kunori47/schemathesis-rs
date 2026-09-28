@@ -3,6 +3,12 @@ use serde_json::Value;
 
 pub struct Shrinker;
 
+impl Default for Shrinker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Shrinker {
     pub fn new() -> Self {
         Self
@@ -139,6 +145,6 @@ mod tests {
         let shrunk = shrinker.shrink_value(&body);
         assert!(!shrunk.is_empty());
         // Verify at least one shrunk value has fewer keys
-        assert!(shrunk.iter().any(|v| v.as_object().map_or(false, |m| m.len() < 3)));
+        assert!(shrunk.iter().any(|v| v.as_object().is_some_and(|m| m.len() < 3)));
     }
 }

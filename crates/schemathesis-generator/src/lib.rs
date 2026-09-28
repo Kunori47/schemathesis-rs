@@ -11,6 +11,12 @@ pub struct CaseGenerator {
     value_generator: ValueGenerator,
 }
 
+impl Default for CaseGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CaseGenerator {
     pub fn new() -> Self {
         Self {
