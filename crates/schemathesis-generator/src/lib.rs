@@ -127,6 +127,7 @@ mod tests {
                 }
             })),
             responses: HashMap::new(),
+            raw: None,
         };
 
         let generator = CaseGenerator::new();
